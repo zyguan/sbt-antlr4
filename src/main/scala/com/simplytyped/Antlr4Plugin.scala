@@ -22,6 +22,7 @@ object Antlr4Plugin extends AutoPlugin {
   private val antlr4BuildDependency = settingKey[ModuleID]("Build dependency required for parsing grammars, scoped to plugin")
 
   def antlr4GeneratorTask : Def.Initialize[Task[Seq[File]]] = Def.task {
+    val srcBaseDir = (sourceDirectory in Antlr4).value
     val targetBaseDir = (javaSource in Antlr4).value
     val classpath = (managedClasspath in Antlr4).value.files
     val log = streams.value.log
@@ -31,6 +32,7 @@ object Antlr4Plugin extends AutoPlugin {
     val cachedCompile = FileFunction.cached(streams.value.cacheDirectory / "antlr4", FilesInfo.lastModified, FilesInfo.exists) {
       in : Set[File] =>
         runAntlr(
+          srcBaseDir = srcBaseDir,
           srcFiles = in,
           targetBaseDir = targetBaseDir,
           classpath = classpath,
@@ -43,7 +45,12 @@ object Antlr4Plugin extends AutoPlugin {
     cachedCompile(((sourceDirectory in Antlr4).value ** "*.g4").get.toSet).toSeq
   }
 
+  private case class Input(out: File, srcs: Seq[File])
+  private def replaceBase(path: File, oldBase: File, newBase: File): Option[File] =
+    path.relativeTo(oldBase).map(newBase/_.getPath)
+
   def runAntlr(
+      srcBaseDir: File,
       srcFiles: Set[File],
       targetBaseDir: File,
       classpath: Seq[File],
@@ -51,16 +58,21 @@ object Antlr4Plugin extends AutoPlugin {
       packageName: Option[String],
       listenerOpt: Boolean,
       visitorOpt: Boolean) = {
-    val targetDir = packageName.map{_.split('.').foldLeft(targetBaseDir){_/_}}.getOrElse(targetBaseDir)
-    val baseArgs = Seq("-cp", Path.makeString(classpath), "org.antlr.v4.Tool", "-o", targetDir.toString)
     val packageArgs = packageName.toSeq.flatMap{p => Seq("-package",p)}
     val listenerArgs = if(listenerOpt) Seq("-listener") else Seq("-no-listener")
     val visitorArgs = if(visitorOpt) Seq("-visitor") else Seq("-no-visitor")
-    val sourceArgs = srcFiles.map{_.toString}
-    val args = baseArgs ++ packageArgs ++ listenerArgs ++ visitorArgs ++ sourceArgs
-    val exitCode = Process("java", args) ! log
-    if(exitCode != 0) sys.error(s"Antlr4 failed with exit code $exitCode")
-    (targetDir ** "*.java").get.toSet
+    val inputs = packageName.fold(
+      srcFiles.map(src =>
+        Input(replaceBase(src.getParentFile, srcBaseDir, targetBaseDir).getOrElse(targetBaseDir), Seq(src))
+      ).toSeq)(
+      pkg => Seq(Input(pkg.split('.').foldLeft(targetBaseDir){_/_}, srcFiles.toSeq)))
+    inputs.foreach { in =>
+      val baseArgs = Seq("-cp", Path.makeString(classpath), "org.antlr.v4.Tool", "-o", in.out.getPath)
+      val args = baseArgs ++ packageArgs ++ listenerArgs ++ visitorArgs ++ in.srcs.map(_.getPath)
+      val exitCode = Process("java", args) ! log
+      if (exitCode != 0) sys.error(s"Antlr4 failed with exit code $exitCode")
+    }
+    (targetBaseDir ** "*.java").get.toSet
   }
 
   override def projectSettings = inConfig(Antlr4)(Seq(
